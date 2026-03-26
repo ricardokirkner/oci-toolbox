@@ -23,7 +23,13 @@ from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 import oci
 
-from oci_toolbox_common import get_home_region, get_region_subscriptions, list_all, load_config
+from oci_toolbox_common import (
+    get_home_region,
+    get_region_subscriptions,
+    list_all,
+    load_config,
+    prompt_delete_confirmation,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -416,8 +422,16 @@ def cleanup_region(
 
 def main() -> int:
     args = parse_args()
+    if args.execute and args.confirm is None:
+        try:
+            args.confirm = prompt_delete_confirmation(
+                'Type DELETE to confirm destructive cleanup'
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     if args.execute and args.confirm != "DELETE":
-        print('Refusing to execute without --confirm DELETE', file=sys.stderr)
+        print('Refusing to execute without confirmation value DELETE', file=sys.stderr)
         return 2
 
     base_config = load_config(args.profile)

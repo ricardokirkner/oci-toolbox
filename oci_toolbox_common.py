@@ -10,7 +10,9 @@ import math
 import multiprocessing
 import os
 import random
+import re
 import shlex
+import sys
 import time
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
@@ -63,6 +65,339 @@ ALWAYS_FREE_MAX_VOLUME_GB = 200
 MIN_BOOT_VOLUME_GB = 50
 TOOLBOX_STATE_DIR = "/var/lib/oci-toolbox"
 BOOTSTRAP_NOTES_PATH = f"{TOOLBOX_STATE_DIR}/bootstrap-notes.txt"
+
+
+def can_prompt() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def prompt_text(prompt: str, default: str | None = None) -> str:
+    if not can_prompt():
+        raise RuntimeError(f"{prompt} is required")
+
+    suffix = f" [{default}]" if default not in (None, "") else ""
+    value = input(f"{prompt}{suffix}: ").strip()
+    if value:
+        return value
+    if default is not None:
+        return default
+    raise RuntimeError(f"{prompt} is required")
+
+
+def prompt_choice(prompt: str, options: Sequence[Tuple[str, str]], default_index: int = 1) -> str:
+    if not can_prompt():
+        raise RuntimeError(f"{prompt} is required")
+
+    print(prompt)
+    for index, (_, label) in enumerate(options, start=1):
+        print(f"{index}. {label}")
+    raw = input(f"Select option [{default_index}]: ").strip()
+    if not raw:
+        chosen = default_index
+    else:
+        chosen = int(raw)
+    if chosen < 1 or chosen > len(options):
+        raise RuntimeError("Invalid selection")
+    return options[chosen - 1][0]
+
+
+def prompt_existing_path(
+    prompt: str,
+    current_value: str | None = None,
+    *,
+    prompt_even_if_exists: bool = False,
+) -> str:
+    candidate = current_value
+    while True:
+        if candidate:
+            expanded = os.path.expanduser(candidate)
+            if os.path.exists(expanded) and not prompt_even_if_exists:
+                return candidate
+            if not can_prompt():
+                raise FileNotFoundError(f"{prompt} not found: {expanded}")
+            if os.path.exists(expanded):
+                prompt_even_if_exists = False
+                candidate = prompt_text(prompt, candidate)
+                continue
+            print(f"{prompt} not found: {expanded}")
+        candidate = prompt_text(prompt, candidate if candidate else None)
+
+
+def prompt_delete_confirmation(message: str) -> str:
+    if not can_prompt():
+        raise RuntimeError(f"{message}. Pass --confirm DELETE to continue.")
+    return prompt_text(message)
+
+
+def sanitize_dns_label(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]", "", value.lower())
+    if not cleaned or not cleaned[0].isalpha():
+        cleaned = f"{fallback}{cleaned}"
+    cleaned = cleaned[:15]
+    if not cleaned:
+        return fallback[:15]
+    return cleaned
+
+
+def wait_for_lifecycle(getter: Callable[[], Any], state: str, timeout_seconds: int = 120) -> Any:
+    deadline = time.time() + timeout_seconds
+    last = None
+    while time.time() < deadline:
+        try:
+            last = getter().data
+        except oci.exceptions.ServiceError as exc:
+            # Newly created OCI resources, especially IAM compartments, can
+            # briefly 404 before the read path catches up to the create path.
+            if exc.status in {404, 409} or exc.code in {
+                "NotAuthorizedOrNotFound",
+                "IncorrectState",
+            }:
+                time.sleep(2)
+                continue
+            raise
+        if getattr(last, "lifecycle_state", None) == state:
+            return last
+        time.sleep(2)
+    raise RuntimeError(f"Timed out waiting for resource to become {state}")
+
+
+def list_compartments_with_root(
+    identity: oci.identity.IdentityClient,
+    root_compartment_id: str,
+) -> List[Tuple[str, str]]:
+    compartments = list_all(
+        identity.list_compartments,
+        compartment_id=root_compartment_id,
+        compartment_id_in_subtree=True,
+        access_level="ANY",
+    )
+    rows = [("ROOT", root_compartment_id)]
+    rows.extend(
+        (compartment.name or compartment.id, compartment.id)
+        for compartment in compartments
+        if compartment.lifecycle_state == "ACTIVE"
+    )
+    return rows
+
+
+def choose_or_create_compartment(
+    identity: oci.identity.IdentityClient,
+    root_compartment_id: str,
+) -> Tuple[str, str]:
+    compartments = list_compartments_with_root(identity, root_compartment_id)
+    options = [(compartment_id, f"{name} ({compartment_id})") for name, compartment_id in compartments]
+    options.append(("__create__", "Create new child compartment"))
+    selected = prompt_choice("Compartment:", options)
+    if selected != "__create__":
+        for name, compartment_id in compartments:
+            if compartment_id == selected:
+                return name, compartment_id
+
+    name = prompt_text("New compartment name", "alwaysfree")
+    description = prompt_text("New compartment description", "Always Free lab")
+    created = identity.create_compartment(
+        oci.identity.models.CreateCompartmentDetails(
+            compartment_id=root_compartment_id,
+            name=name,
+            description=description,
+        )
+    ).data
+    compartment = wait_for_lifecycle(
+        lambda: identity.get_compartment(created.id),
+        "ACTIVE",
+    )
+    return compartment.name, compartment.id
+
+
+def list_vcns(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+) -> List[oci.core.models.Vcn]:
+    return [
+        vcn
+        for vcn in list_all(
+            network.list_vcns,
+            compartment_id=compartment_id,
+        )
+        if vcn.lifecycle_state == "AVAILABLE"
+    ]
+
+
+def choose_or_create_vcn(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+) -> oci.core.models.Vcn:
+    vcns = list_vcns(network, compartment_id)
+    options = [(vcn.id, f"{vcn.display_name or vcn.id} ({vcn.id})") for vcn in vcns]
+    options.append(("__create__", "Create new VCN"))
+    selected = prompt_choice("VCN:", options)
+    if selected != "__create__":
+        return network.get_vcn(selected).data
+
+    display_name = prompt_text("New VCN display name", "always-free-vcn")
+    cidr_block = prompt_text("VCN CIDR block", "10.0.0.0/16")
+    dns_label = prompt_text("VCN DNS label", sanitize_dns_label(display_name, "toolboxnet"))
+    created = network.create_vcn(
+        oci.core.models.CreateVcnDetails(
+            compartment_id=compartment_id,
+            display_name=display_name,
+            cidr_blocks=[cidr_block],
+            dns_label=dns_label,
+        )
+    ).data
+    return wait_for_lifecycle(lambda: network.get_vcn(created.id), "AVAILABLE")
+
+
+def ensure_internet_gateway(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+    vcn_id: str,
+) -> oci.core.models.InternetGateway:
+    gateways = [
+        gateway
+        for gateway in list_all(
+            network.list_internet_gateways,
+            compartment_id=compartment_id,
+            vcn_id=vcn_id,
+        )
+        if gateway.lifecycle_state == "AVAILABLE" and gateway.is_enabled
+    ]
+    if gateways:
+        return gateways[0]
+
+    return network.create_internet_gateway(
+        oci.core.models.CreateInternetGatewayDetails(
+            compartment_id=compartment_id,
+            display_name="public-igw",
+            is_enabled=True,
+            vcn_id=vcn_id,
+        )
+    ).data
+
+
+def create_public_route_table(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+    vcn_id: str,
+    internet_gateway_id: str,
+) -> oci.core.models.RouteTable:
+    return network.create_route_table(
+        oci.core.models.CreateRouteTableDetails(
+            compartment_id=compartment_id,
+            display_name="public-route-table",
+            vcn_id=vcn_id,
+            route_rules=[
+                oci.core.models.RouteRule(
+                    destination="0.0.0.0/0",
+                    destination_type="CIDR_BLOCK",
+                    network_entity_id=internet_gateway_id,
+                )
+            ],
+        )
+    ).data
+
+
+def create_public_security_list(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+    vcn_id: str,
+    ssh_cidr: str,
+) -> oci.core.models.SecurityList:
+    return network.create_security_list(
+        oci.core.models.CreateSecurityListDetails(
+            compartment_id=compartment_id,
+            display_name="public-security-list",
+            vcn_id=vcn_id,
+            ingress_security_rules=[
+                oci.core.models.IngressSecurityRule(
+                    protocol="6",
+                    source=ssh_cidr,
+                    source_type="CIDR_BLOCK",
+                    tcp_options=oci.core.models.TcpOptions(
+                        destination_port_range=oci.core.models.PortRange(min=22, max=22)
+                    ),
+                    description="Allow SSH",
+                )
+            ],
+            egress_security_rules=[
+                oci.core.models.EgressSecurityRule(
+                    protocol="all",
+                    destination="0.0.0.0/0",
+                    destination_type="CIDR_BLOCK",
+                    description="Allow all egress",
+                )
+            ],
+        )
+    ).data
+
+
+def list_subnets(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+    vcn_id: str,
+) -> List[oci.core.models.Subnet]:
+    return [
+        subnet
+        for subnet in list_all(
+            network.list_subnets,
+            compartment_id=compartment_id,
+            vcn_id=vcn_id,
+        )
+        if subnet.lifecycle_state == "AVAILABLE"
+    ]
+
+
+def choose_or_create_subnet(
+    network: oci.core.VirtualNetworkClient,
+    compartment_id: str,
+    vcn: oci.core.models.Vcn,
+) -> oci.core.models.Subnet:
+    subnets = list_subnets(network, compartment_id, vcn.id)
+    options = [(subnet.id, f"{subnet.display_name or subnet.id} ({subnet.id})") for subnet in subnets]
+    options.append(("__create__", "Create new public subnet"))
+    selected = prompt_choice("Subnet:", options)
+    if selected != "__create__":
+        subnet = network.get_subnet(selected).data
+        if subnet.prohibit_public_ip_on_vnic:
+            raise RuntimeError(
+                "Selected subnet prohibits public IPs on VNICs. Choose another subnet or create a new public subnet."
+            )
+        return subnet
+
+    display_name = prompt_text("New subnet display name", "public-subnet")
+    cidr_block = prompt_text("Subnet CIDR block", "10.0.1.0/24")
+    dns_label = prompt_text("Subnet DNS label", sanitize_dns_label(display_name, "publicsubnet"))
+    ssh_cidr = prompt_text("SSH ingress CIDR", "0.0.0.0/0")
+    internet_gateway = ensure_internet_gateway(network, compartment_id, vcn.id)
+    route_table = create_public_route_table(network, compartment_id, vcn.id, internet_gateway.id)
+    security_list = create_public_security_list(network, compartment_id, vcn.id, ssh_cidr)
+    created = network.create_subnet(
+        oci.core.models.CreateSubnetDetails(
+            compartment_id=compartment_id,
+            vcn_id=vcn.id,
+            display_name=display_name,
+            cidr_block=cidr_block,
+            dns_label=dns_label,
+            prohibit_public_ip_on_vnic=False,
+            route_table_id=route_table.id,
+            security_list_ids=[security_list.id],
+        )
+    ).data
+    return wait_for_lifecycle(lambda: network.get_subnet(created.id), "AVAILABLE")
+
+
+def choose_region(
+    prompt: str,
+    regions: Sequence[str],
+    default_region: str | None = None,
+) -> str:
+    if not regions:
+        raise RuntimeError("No selectable regions were provided")
+    options = [(region_name, region_name) for region_name in regions]
+    default_index = 1
+    if default_region in regions:
+        default_index = regions.index(default_region) + 1
+    return prompt_choice(prompt, options, default_index=default_index)
 
 
 def list_all(func: Callable[..., Any], **kwargs: Any) -> List[Any]:

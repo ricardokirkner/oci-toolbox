@@ -24,10 +24,12 @@ from typing import List, Tuple
 import oci
 
 from oci_toolbox_common import (
-    DEFAULT_COMPARTMENT_ID,
     DEFAULT_SUBNET_IDS,
     MIN_BOOT_VOLUME_GB,
     calculate_always_free_headroom,
+    choose_or_create_compartment,
+    choose_or_create_subnet,
+    choose_or_create_vcn,
     describe_region_choice,
     filter_regions_with_subnets,
     filter_shapes_for_headroom,
@@ -36,6 +38,7 @@ from oci_toolbox_common import (
     load_config,
     load_ssh_key,
     parse_shapes,
+    prompt_existing_path,
     rank_regions_by_distance,
     resolve_location,
     resolve_subnet_id,
@@ -53,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name")
     parser.add_argument(
         "--compartment-id",
-        default=os.environ.get("OCI_COMPARTMENT_ID", DEFAULT_COMPARTMENT_ID),
+        default=os.environ.get("OCI_COMPARTMENT_ID"),
         help="Compartment OCID used for images and instance creation",
     )
     parser.add_argument(
@@ -122,18 +125,23 @@ def main() -> int:
         args = parse_args()
         if args.workers != 1:
             raise ValueError("Only --workers 1 is supported.")
-        shapes = parse_shapes(args.shapes)
-        ssh_key = load_ssh_key(args.ssh_key_path)
         base_config = load_config(args.profile)
-        location = resolve_location(args)
-
-        if not args.compartment_id:
-            args.compartment_id = base_config.get("tenancy")
 
         identity = oci.identity.IdentityClient(base_config)
         subscriptions = get_region_subscriptions(identity, base_config["tenancy"])
         subscribed_regions = [item.region_name for item in subscriptions]
         home_region = get_home_region(subscriptions)
+
+        if not args.compartment_id:
+            compartment_name, args.compartment_id = choose_or_create_compartment(
+                identity, base_config["tenancy"]
+            )
+            print(f"Using compartment: {compartment_name} ({args.compartment_id})")
+        args.ssh_key_path = prompt_existing_path("SSH public key path", args.ssh_key_path)
+
+        shapes = parse_shapes(args.shapes)
+        ssh_key = load_ssh_key(args.ssh_key_path)
+        location = resolve_location(args)
         ranked_regions = rank_regions_by_distance(
             subscribed_regions,
             float(location["latitude"]),
@@ -164,6 +172,15 @@ def main() -> int:
             )
 
         candidate_regions = [home_region]
+        if not args.subnet_id and not resolve_subnet_id(home_region, None, DEFAULT_SUBNET_IDS):
+            region_config = base_config.copy()
+            region_config["region"] = home_region
+            network = oci.core.VirtualNetworkClient(region_config)
+            vcn = choose_or_create_vcn(network, args.compartment_id)
+            print(f"Using VCN: {vcn.display_name} ({vcn.id})")
+            subnet = choose_or_create_subnet(network, args.compartment_id, vcn)
+            print(f"Using subnet: {subnet.display_name} ({subnet.id})")
+            args.subnet_id = subnet.id
 
         candidate_regions = filter_regions_with_subnets(
             candidate_regions, args.subnet_id, DEFAULT_SUBNET_IDS
