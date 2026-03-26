@@ -5,6 +5,7 @@ OPENCLAW_USER=openclaw
 OPENCLAW_PREFIX=
 OPENCLAW_VERSION=latest
 HOMEBREW_PREFIX=
+LINUXBREW_USER=linuxbrew
 
 usage() {
   cat <<'EOF'
@@ -81,7 +82,7 @@ resolve_user_context() {
     OPENCLAW_PREFIX="${USER_HOME}/.openclaw"
   fi
 
-  HOMEBREW_PREFIX="${USER_HOME}/.linuxbrew"
+  HOMEBREW_PREFIX="/home/${LINUXBREW_USER}/.linuxbrew"
   OPENCLAW_BIN="${OPENCLAW_PREFIX}/bin/openclaw"
 }
 
@@ -102,16 +103,41 @@ install_packages() {
     python3-pip
 }
 
+ensure_linuxbrew_user() {
+  if getent passwd "${LINUXBREW_USER}" >/dev/null 2>&1; then
+    return
+  fi
+
+  log "creating Linuxbrew role account ${LINUXBREW_USER}"
+  useradd --create-home --home-dir "/home/${LINUXBREW_USER}" --shell /bin/bash --user-group "${LINUXBREW_USER}"
+}
+
+prepare_linuxbrew_prefix() {
+  ensure_linuxbrew_user
+  install -d -o "${LINUXBREW_USER}" -g "${LINUXBREW_USER}" -m 0755 "/home/${LINUXBREW_USER}"
+  install -d -o "${LINUXBREW_USER}" -g "${LINUXBREW_USER}" -m 2775 "${HOMEBREW_PREFIX}"
+}
+
 install_homebrew() {
   if [[ -x "${HOMEBREW_PREFIX}/bin/brew" ]]; then
     return
   fi
 
-  log "installing Linuxbrew for ${OPENCLAW_USER}"
-  su - "${OPENCLAW_USER}" -c \
+  prepare_linuxbrew_prefix
+
+  log "installing Linuxbrew under ${HOMEBREW_PREFIX}"
+  su - "${LINUXBREW_USER}" -c \
     'NONINTERACTIVE=1 CI=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
   [[ -x "${HOMEBREW_PREFIX}/bin/brew" ]] || die "Homebrew installation did not produce ${HOMEBREW_PREFIX}/bin/brew"
+}
+
+grant_openclaw_brew_access() {
+  log "granting ${OPENCLAW_USER} access to shared Homebrew prefix"
+  usermod -aG "${LINUXBREW_USER}" "${OPENCLAW_USER}"
+  chgrp -R "${LINUXBREW_USER}" "/home/${LINUXBREW_USER}"
+  find "${HOMEBREW_PREFIX}" -type d -exec chmod 2775 {} +
+  find "${HOMEBREW_PREFIX}" -type f -exec chmod g+rw {} +
 }
 
 write_homebrew_shell_env() {
@@ -186,6 +212,7 @@ main() {
   log "installing OpenClaw for ${OPENCLAW_USER} into ${OPENCLAW_PREFIX}"
   install_packages
   install_homebrew
+  grant_openclaw_brew_access
   write_homebrew_shell_env
   write_homebrew_systemd_env
   install_openclaw

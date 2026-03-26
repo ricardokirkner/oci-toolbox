@@ -14,6 +14,8 @@ Small OCI CLI helpers for:
 - `best_region_always_free_provisioner.py`: focused Always Free provisioner
 - `openclaw_provisioner.py`: OpenClaw flow that first offers existing OCI hosts, then falls back to provisioning a new Always Free host
 - `bootstrap_openclaw_host.sh`: reusable remote bootstrap script that installs OpenClaw under a dedicated `openclaw` service user
+- `review_openclaw_host.sh`: review-and-repair script for OpenClaw host setup
+- `sync_openclaw_config_host.sh`: installs a tracked OpenClaw config repo on the host and repoints the service to it
 - `audit_ubuntu_host.sh`: read-only audit script for a provisioned Ubuntu OCI VM
 - `harden_ubuntu_host.sh`: conservative Ubuntu host-hardening script for provisioned OCI VMs
 - `oci_account_inventory.py`: inventory report across subscribed regions
@@ -32,6 +34,11 @@ Install the SDK if needed:
 ```bash
 python3 -m pip install oci
 ```
+
+You can also create a local `.env` file for the `make` commands. The Makefile
+loads `.env` automatically, so values like `HOST`, `SSH_USER`, `SSH_KEY_PATH`,
+`PROFILE`, `COMPARTMENT_ID`, and `SUBNET_ID` do not need to be repeated on each
+command. Start from `.env.example` if you want a template.
 
 ## Quick Start
 
@@ -81,6 +88,31 @@ installed under a dedicated `openclaw` service user by default, and the
 bootstrap flow also installs Linuxbrew for that user so Homebrew-managed skill
 dependencies are available both in the `openclaw` shell and in its
 `systemd --user` environment.
+
+Review an existing host's OpenClaw setup and repair common issues:
+
+```bash
+make review-openclaw-host \
+  HOST=<public-ip-or-dns> \
+  SSH_USER=ubuntu \
+  SSH_KEY_PATH=~/.ssh/id_rsa
+```
+
+Sync a tracked local OpenClaw config repo to the host:
+
+```bash
+make sync-openclaw-config \
+  HOST=<public-ip-or-dns> \
+  SSH_USER=ubuntu \
+  SSH_KEY_PATH=~/.ssh/id_rsa \
+  OPENCLAW_CONFIG_REPO=/path/to/openclaw-config-repo
+```
+
+The expected repo layout is simple: keep `openclaw.json` at the repo root, and
+store any included files or directories underneath that same root. The sync
+command copies the repo to the host, points the `openclaw` service user at the
+tracked `openclaw.json`, validates the config, and restarts the gateway if that
+user service is already active.
 
 Verify whether a launch is aligned with the documented Always Free envelope:
 
@@ -217,8 +249,12 @@ make reset-dry-run
 make audit-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa
 make audit-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa AUDIT_EXPECT_PORTS="22 443"
 make harden-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa HARDEN_ALLOW_PORTS="80 443"
+make review-openclaw-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa
+make sync-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/openclaw-config-repo
 ```
 
 If you omit `COMPARTMENT_ID`, `SUBNET_ID`, or `REGION` on the provisioning
 commands, the CLI can list existing OCI resources and let you select one or
-create a new one interactively.
+create a new one interactively. For `make` commands, those values can also come
+from a local `.env` file, and command-line assignments still take precedence
+over `.env`.
