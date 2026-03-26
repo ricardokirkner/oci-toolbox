@@ -12,6 +12,7 @@ Small OCI CLI helpers for:
 
 - `best_region_provisioner.py`: main CLI with `suggest`, `provision`, `setup-provision`, and `verify`
 - `best_region_always_free_provisioner.py`: focused Always Free provisioner
+- `openclaw_provisioner.py`: dedicated Always Free-oriented provisioner that bootstraps the OpenClaw CLI
 - `audit_ubuntu_host.sh`: read-only audit script for a provisioned Ubuntu OCI VM
 - `harden_ubuntu_host.sh`: conservative Ubuntu host-hardening script for provisioned OCI VMs
 - `oci_account_inventory.py`: inventory report across subscribed regions
@@ -61,6 +62,18 @@ python3 best_region_provisioner.py provision \
   --region us-ashburn-1 \
   --subnet-id <subnet-ocid>
 ```
+
+Provision an OpenClaw host with OpenClaw preinstalled for the `ubuntu` user:
+
+```bash
+python3 openclaw_provisioner.py \
+  --profile DEFAULT \
+  --compartment-id <compartment-ocid> \
+  --subnet-id <subnet-ocid>
+```
+
+Use `--openclaw-version` to pin a channel or version, or `--no-bootstrap` if you
+only want the OCI provisioning step.
 
 Verify whether a launch is aligned with the documented Always Free envelope:
 
@@ -189,6 +202,7 @@ make help
 make check
 make suggest
 make setup-provision PROFILE=DEFAULT
+make provision-openclaw PROFILE=DEFAULT COMPARTMENT_ID=<compartment-ocid> SUBNET_ID=<subnet-ocid>
 make provision-always-free PROFILE=DEFAULT COMPARTMENT_ID=<compartment-ocid> SUBNET_ID=<subnet-ocid>
 make verify PROFILE=DEFAULT COMPARTMENT_ID=<compartment-ocid> INSTANCE_ID=<instance-ocid>
 make inventory

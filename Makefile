@@ -16,7 +16,7 @@ REMOTE_SCRIPT_PATH ?= /tmp/harden_ubuntu_host.sh
 REMOTE_AUDIT_SCRIPT_PATH ?= /tmp/audit_ubuntu_host.sh
 PY_CACHE_PREFIX ?= /tmp/oci-toolbox-pyc
 
-.PHONY: help check suggest suggest-capacity setup-provision provision-always-free provision-payg verify inventory inventory-json reset-dry-run reset-execute harden-host audit-host
+.PHONY: help check suggest suggest-capacity setup-provision provision-openclaw provision-always-free provision-payg verify inventory inventory-json reset-dry-run reset-execute harden-host audit-host
 
 help:
 	@printf '%s\n' \
@@ -25,6 +25,7 @@ help:
 	'  make suggest PROFILE=DEFAULT' \
 	'  make suggest-capacity PROFILE=DEFAULT' \
 	'  make setup-provision PROFILE=DEFAULT' \
+	'  make provision-openclaw PROFILE=DEFAULT COMPARTMENT_ID=<ocid> SUBNET_ID=<ocid>' \
 	'  make provision-always-free PROFILE=DEFAULT COMPARTMENT_ID=<ocid> SUBNET_ID=<ocid>' \
 	'  make provision-payg PROFILE=DEFAULT COMPARTMENT_ID=<ocid> SUBNET_ID=<ocid> REGION=<region>' \
 	'  make verify PROFILE=DEFAULT COMPARTMENT_ID=<ocid> INSTANCE_ID=<ocid>' \
@@ -50,6 +51,12 @@ suggest-capacity:
 
 setup-provision:
 	$(PYTHON) best_region_provisioner.py setup-provision --profile $(PROFILE)
+
+provision-openclaw: guard-compartment-id guard-subnet-id
+	$(PYTHON) openclaw_provisioner.py \
+		--profile $(PROFILE) \
+		--compartment-id $(COMPARTMENT_ID) \
+		--subnet-id $(SUBNET_ID)
 
 provision-always-free: guard-compartment-id guard-subnet-id
 	$(PYTHON) best_region_provisioner.py provision \

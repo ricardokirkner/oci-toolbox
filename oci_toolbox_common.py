@@ -10,6 +10,7 @@ import math
 import multiprocessing
 import os
 import random
+import shlex
 import time
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
@@ -186,6 +187,60 @@ runcmd:
 """
 
 
+def build_openclaw_cloud_init(openclaw_prefix: str, openclaw_version: str) -> str:
+    install_command = (
+        "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install-cli.sh "
+        f"| bash -s -- --prefix {shlex.quote(openclaw_prefix)} "
+        f"--version {shlex.quote(openclaw_version)}"
+    )
+    doctor_command = (
+        f"{shlex.quote(os.path.join(openclaw_prefix, 'bin', 'openclaw'))} "
+        "doctor --non-interactive || true"
+    )
+    openclaw_binary = shlex.quote(os.path.join(openclaw_prefix, "bin", "openclaw"))
+    quoted_prefix = shlex.quote(openclaw_prefix)
+    quoted_version = shlex.quote(openclaw_version)
+
+    return f"""#cloud-config
+package_update: true
+package_upgrade: true
+write_files:
+  - path: {BOOTSTRAP_NOTES_PATH}
+    permissions: "0644"
+    content: |
+      Provisioned by oci-toolbox
+      Role: OpenClaw gateway host
+      Architecture: ARM64 (OCI VM.Standard.A1.Flex)
+      OpenClaw prefix: {openclaw_prefix}
+      OpenClaw version: {openclaw_version}
+      Next steps after the host is reachable:
+      - ssh ubuntu@<public-ip>
+      - openclaw onboard --install-daemon
+      - openclaw gateway status
+  - path: /usr/local/sbin/bootstrap-openclaw.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y build-essential git curl ca-certificates jq unzip python3 python3-pip
+      loginctl enable-linger ubuntu || true
+      install -d -o ubuntu -g ubuntu -m 0755 {quoted_prefix}
+      su - ubuntu -c {shlex.quote(install_command)}
+      ln -sf {openclaw_binary} /usr/local/bin/openclaw
+      chown -R ubuntu:ubuntu {quoted_prefix}
+      su - ubuntu -c {shlex.quote(doctor_command)}
+      if [[ -x {openclaw_binary} ]]; then
+        printf '%s\\n' 'OpenClaw:' \"$({openclaw_binary} --version)\" >> {BOOTSTRAP_NOTES_PATH}
+      fi
+      printf '%s\\n' 'Bootstrap complete.' >> {BOOTSTRAP_NOTES_PATH}
+runcmd:
+  - mkdir -p {TOOLBOX_STATE_DIR}
+  - /usr/local/sbin/bootstrap-openclaw.sh
+"""
+
+
 def get_latest_ubuntu_image(
     compute_client: oci.core.ComputeClient, compartment_id: str
 ) -> str:
@@ -243,12 +298,13 @@ def build_launch_details(
     memory_gb: int,
     boot_volume_gb: int,
     bootstrap: bool,
+    cloud_init_data: str | None = None,
+    role_tag: str = "generic-arm-host",
 ) -> oci.core.models.LaunchInstanceDetails:
     metadata = {"ssh_authorized_keys": ssh_key}
+    user_data = cloud_init_data if cloud_init_data is not None else build_cloud_init()
     if bootstrap:
-        metadata["user_data"] = base64.b64encode(build_cloud_init().encode("utf-8")).decode(
-            "ascii"
-        )
+        metadata["user_data"] = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
 
     return oci.core.models.LaunchInstanceDetails(
         compartment_id=compartment_id,
@@ -270,7 +326,7 @@ def build_launch_details(
         metadata=metadata,
         freeform_tags={
             "managed-by": "oci-toolbox",
-            "role": "generic-arm-host",
+            "role": role_tag,
         },
     )
 
@@ -321,6 +377,8 @@ def worker(
     bootstrap: bool,
     stop_event: multiprocessing.synchronize.Event,
     result_queue: multiprocessing.Queue,
+    cloud_init_data: str | None = None,
+    role_tag: str = "generic-arm-host",
 ) -> None:
     base_config = load_config(profile)
     region_state: Dict[str, Dict[str, object]] = {}
@@ -392,6 +450,8 @@ def worker(
                                 memory_gb=memory_gb,
                                 boot_volume_gb=boot_volume_gb,
                                 bootstrap=bootstrap,
+                                cloud_init_data=cloud_init_data,
+                                role_tag=role_tag,
                             )
                         )
                         instance = response.data
