@@ -31,6 +31,10 @@ die() {
   exit 1
 }
 
+systemctl_user() {
+  systemctl --machine="${OPENCLAW_USER}@.host" --user "$@"
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "run this script as root or via sudo"
@@ -135,15 +139,15 @@ validate_config() {
 }
 
 refresh_gateway_service() {
-  if ! su - "${OPENCLAW_USER}" -c "systemctl --user list-unit-files | grep -q '^openclaw-gateway.service'" >/dev/null 2>&1; then
+  if ! systemctl_user list-unit-files | grep -q '^openclaw-gateway.service'; then
     log "gateway service is not installed yet; config path was updated without restarting anything"
     return
   fi
 
-  su - "${OPENCLAW_USER}" -c "systemctl --user daemon-reload"
+  systemctl_user daemon-reload
 
-  if su - "${OPENCLAW_USER}" -c "systemctl --user is-active --quiet openclaw-gateway.service"; then
-    su - "${OPENCLAW_USER}" -c "systemctl --user restart openclaw-gateway.service"
+  if systemctl_user is-active --quiet openclaw-gateway.service; then
+    systemctl_user restart openclaw-gateway.service
     log "restarted openclaw-gateway.service"
   else
     log "gateway service exists but is not active; config path was updated"

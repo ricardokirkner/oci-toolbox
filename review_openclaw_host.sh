@@ -46,6 +46,12 @@ fail() {
   FAIL_ITEMS+=("$*")
 }
 
+systemctl_user() {
+  local user_name=$1
+  shift
+  systemctl --machine="${user_name}@.host" --user "$@"
+}
+
 print_items() {
   local title=$1
   shift
@@ -212,12 +218,10 @@ cleanup_legacy_install() {
     su - "${LEGACY_OPENCLAW_USER}" -c "$(printf "%q uninstall --all --yes --non-interactive || true" "${legacy_cli}")"
   fi
 
-  su - "${LEGACY_OPENCLAW_USER}" -c '
-    systemctl --user disable --now openclaw-gateway.service >/dev/null 2>&1 || true
-    rm -f ~/.config/systemd/user/openclaw-gateway.service
-    rm -f ~/.config/systemd/user/openclaw-gateway-*.service
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-  ' || true
+  systemctl_user "${LEGACY_OPENCLAW_USER}" disable --now openclaw-gateway.service >/dev/null 2>&1 || true
+  rm -f "${legacy_home}/.config/systemd/user/openclaw-gateway.service"
+  rm -f "${legacy_home}"/.config/systemd/user/openclaw-gateway-*.service
+  systemctl_user "${LEGACY_OPENCLAW_USER}" daemon-reload >/dev/null 2>&1 || true
 
   if [[ "$(readlink -f /usr/local/bin/openclaw 2>/dev/null || true)" == "${legacy_cli}" ]]; then
     rm -f /usr/local/bin/openclaw

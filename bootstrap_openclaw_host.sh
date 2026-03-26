@@ -28,6 +28,10 @@ die() {
   exit 1
 }
 
+systemctl_user() {
+  systemctl --machine="${OPENCLAW_USER}@.host" --user "$@"
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "run this script as root or via sudo"
@@ -184,7 +188,7 @@ EOF
   chown "${OPENCLAW_USER}:${USER_GROUP}" "${env_file}"
   chmod 0644 "${env_file}"
 
-  su - "${OPENCLAW_USER}" -c 'systemctl --user daemon-reexec >/dev/null 2>&1 || true'
+  systemctl_user daemon-reexec >/dev/null 2>&1 || true
 }
 
 install_openclaw() {
