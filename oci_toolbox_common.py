@@ -13,7 +13,9 @@ import random
 import re
 import shlex
 import sys
+import textwrap
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
 import oci
@@ -65,6 +67,9 @@ ALWAYS_FREE_MAX_VOLUME_GB = 200
 MIN_BOOT_VOLUME_GB = 50
 TOOLBOX_STATE_DIR = "/var/lib/oci-toolbox"
 BOOTSTRAP_NOTES_PATH = f"{TOOLBOX_STATE_DIR}/bootstrap-notes.txt"
+OPENCLAW_BOOTSTRAP_SCRIPT_PATH = (
+    Path(__file__).resolve().with_name("bootstrap_openclaw_host.sh")
+)
 
 
 def can_prompt() -> bool:
@@ -522,19 +527,17 @@ runcmd:
 """
 
 
-def build_openclaw_cloud_init(openclaw_prefix: str, openclaw_version: str) -> str:
-    install_command = (
-        "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install-cli.sh "
-        f"| bash -s -- --prefix {shlex.quote(openclaw_prefix)} "
-        f"--version {shlex.quote(openclaw_version)}"
-    )
-    doctor_command = (
-        f"{shlex.quote(os.path.join(openclaw_prefix, 'bin', 'openclaw'))} "
-        "doctor --non-interactive || true"
-    )
-    openclaw_binary = shlex.quote(os.path.join(openclaw_prefix, "bin", "openclaw"))
-    quoted_prefix = shlex.quote(openclaw_prefix)
-    quoted_version = shlex.quote(openclaw_version)
+def load_openclaw_bootstrap_script() -> str:
+    return OPENCLAW_BOOTSTRAP_SCRIPT_PATH.read_text(encoding="utf-8")
+
+
+def build_openclaw_cloud_init(
+    openclaw_prefix: str,
+    openclaw_version: str,
+    openclaw_user: str = "openclaw",
+    admin_ssh_user: str = "ubuntu",
+) -> str:
+    bootstrap_script = textwrap.indent(load_openclaw_bootstrap_script().rstrip(), "      ")
 
     return f"""#cloud-config
 package_update: true
@@ -546,33 +549,23 @@ write_files:
       Provisioned by oci-toolbox
       Role: OpenClaw gateway host
       Architecture: ARM64 (OCI VM.Standard.A1.Flex)
+      OpenClaw user: {openclaw_user}
       OpenClaw prefix: {openclaw_prefix}
       OpenClaw version: {openclaw_version}
       Next steps after the host is reachable:
-      - ssh ubuntu@<public-ip>
+      - ssh {admin_ssh_user}@<public-ip>
+      - sudo -iu {openclaw_user}
       - openclaw onboard --install-daemon
       - openclaw gateway status
   - path: /usr/local/sbin/bootstrap-openclaw.sh
     permissions: "0755"
     content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y build-essential git curl ca-certificates jq unzip python3 python3-pip
-      loginctl enable-linger ubuntu || true
-      install -d -o ubuntu -g ubuntu -m 0755 {quoted_prefix}
-      su - ubuntu -c {shlex.quote(install_command)}
-      ln -sf {openclaw_binary} /usr/local/bin/openclaw
-      chown -R ubuntu:ubuntu {quoted_prefix}
-      su - ubuntu -c {shlex.quote(doctor_command)}
-      if [[ -x {openclaw_binary} ]]; then
-        printf '%s\\n' 'OpenClaw:' \"$({openclaw_binary} --version)\" >> {BOOTSTRAP_NOTES_PATH}
-      fi
-      printf '%s\\n' 'Bootstrap complete.' >> {BOOTSTRAP_NOTES_PATH}
+{bootstrap_script}
 runcmd:
   - mkdir -p {TOOLBOX_STATE_DIR}
-  - /usr/local/sbin/bootstrap-openclaw.sh
+  - /usr/local/sbin/bootstrap-openclaw.sh --openclaw-user {shlex.quote(openclaw_user)} --openclaw-prefix {shlex.quote(openclaw_prefix)} --openclaw-version {shlex.quote(openclaw_version)}
+  - if [ -x {shlex.quote(os.path.join(openclaw_prefix, "bin", "openclaw"))} ]; then printf '%s\\n' 'OpenClaw:' \"$({shlex.quote(os.path.join(openclaw_prefix, "bin", "openclaw"))} --version)\" >> {BOOTSTRAP_NOTES_PATH}; fi
+  - printf '%s\\n' 'Bootstrap complete.' >> {BOOTSTRAP_NOTES_PATH}
 """
 
 

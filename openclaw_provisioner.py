@@ -5,7 +5,7 @@ Provision an OCI A1 instance bootstrapped for OpenClaw.
 This flow keeps the OCI-side logic intentionally narrow:
 - Always Free-compatible home-region launches only
 - Ubuntu ARM images on VM.Standard.A1.Flex
-- OpenClaw CLI bootstrapped via cloud-init for the ubuntu user
+- OpenClaw CLI bootstrapped into a dedicated non-root service user
 """
 
 from __future__ import annotations
@@ -14,49 +14,79 @@ import argparse
 import multiprocessing
 import os
 import queue
+import shlex
+import subprocess
 import sys
-from typing import List
+from pathlib import Path
+from typing import Any, Dict, List, Sequence, Tuple
 
 import oci
 
 from oci_toolbox_common import (
-    DEFAULT_COMPARTMENT_ID,
     DEFAULT_SUBNET_IDS,
     MIN_BOOT_VOLUME_GB,
     build_openclaw_cloud_init,
+    can_prompt,
     calculate_always_free_headroom,
+    choose_or_create_compartment,
+    choose_or_create_subnet,
+    choose_or_create_vcn,
     describe_region_choice,
     filter_regions_with_subnets,
     filter_shapes_for_headroom,
     get_home_region,
     get_region_subscriptions,
+    list_all,
+    list_compartments_with_root,
     load_config,
     load_ssh_key,
     parse_shapes,
+    prompt_choice,
+    prompt_existing_path,
+    prompt_text,
     rank_regions_by_distance,
     resolve_location,
     resolve_subnet_id,
     worker,
 )
 
+REMOTE_OPENCLAW_BOOTSTRAP_PATH = "/tmp/bootstrap_openclaw_host.sh"
+DEFAULT_OPENCLAW_USER = "openclaw"
+DEFAULT_OPENCLAW_PREFIX = f"/home/{DEFAULT_OPENCLAW_USER}/.openclaw"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Launch an Always Free-friendly OCI A1 instance and preinstall the "
-            "OpenClaw CLI for the ubuntu user."
+            "Bootstrap OpenClaw onto an existing OCI host or provision a new "
+            "Always Free-friendly OCI A1 instance."
         )
     )
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name")
     parser.add_argument(
         "--compartment-id",
-        default=os.environ.get("OCI_COMPARTMENT_ID", DEFAULT_COMPARTMENT_ID),
+        default=os.environ.get("OCI_COMPARTMENT_ID"),
         help="Compartment OCID used for images and instance creation",
     )
     parser.add_argument(
         "--ssh-key-path",
         default=os.path.expanduser("~/.ssh/id_rsa.pub"),
         help="Public SSH key injected into the instance",
+    )
+    parser.add_argument(
+        "--ssh-private-key-path",
+        help="Private SSH key used when bootstrapping an existing host over SSH",
+    )
+    parser.add_argument(
+        "--ssh-user",
+        default="ubuntu",
+        help="SSH user for existing-host bootstrap flows",
+    )
+    parser.add_argument(
+        "--ssh-port",
+        type=int,
+        default=22,
+        help="SSH port for existing-host bootstrap flows",
     )
     parser.add_argument(
         "--subnet-id",
@@ -102,8 +132,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--openclaw-prefix",
-        default="/home/ubuntu/.openclaw",
+        default=DEFAULT_OPENCLAW_PREFIX,
         help="Install prefix for the OpenClaw CLI on the instance",
+    )
+    parser.add_argument(
+        "--openclaw-user",
+        default=DEFAULT_OPENCLAW_USER,
+        help="Dedicated service user that owns and runs OpenClaw",
     )
     parser.add_argument(
         "--openclaw-version",
@@ -130,24 +165,219 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def default_private_key_path(public_key_path: str) -> str:
+    expanded = os.path.expanduser(public_key_path)
+    if expanded.endswith(".pub"):
+        return expanded[:-4]
+    return os.path.expanduser("~/.ssh/id_rsa")
+
+
+def resolve_openclaw_prefix(args: argparse.Namespace) -> str:
+    if (
+        args.openclaw_user != DEFAULT_OPENCLAW_USER
+        and args.openclaw_prefix == DEFAULT_OPENCLAW_PREFIX
+    ):
+        return f"/home/{args.openclaw_user}/.openclaw"
+    return args.openclaw_prefix
+
+
+def get_instance_public_ip(
+    compute: oci.core.ComputeClient,
+    network: oci.core.VirtualNetworkClient,
+    instance: oci.core.models.Instance,
+) -> str | None:
+    attachments = list_all(
+        compute.list_vnic_attachments,
+        compartment_id=instance.compartment_id,
+        instance_id=instance.id,
+    )
+    for attachment in attachments:
+        vnic = network.get_vnic(attachment.vnic_id).data
+        if getattr(vnic, "public_ip", None):
+            return str(vnic.public_ip)
+    return None
+
+
+def collect_existing_hosts(
+    base_config: Dict[str, str],
+    compartment_rows: Sequence[Tuple[str, str]],
+    subscribed_regions: Sequence[str],
+) -> List[Dict[str, Any]]:
+    hosts: List[Dict[str, Any]] = []
+
+    for region_name in subscribed_regions:
+        region_config = base_config.copy()
+        region_config["region"] = region_name
+        compute = oci.core.ComputeClient(region_config)
+        network = oci.core.VirtualNetworkClient(region_config)
+
+        for compartment_name, compartment_id in compartment_rows:
+            instances = [
+                instance
+                for instance in list_all(compute.list_instances, compartment_id=compartment_id)
+                if instance.lifecycle_state == "RUNNING"
+            ]
+            for instance in instances:
+                public_ip = get_instance_public_ip(compute, network, instance)
+                if not public_ip:
+                    continue
+                hosts.append(
+                    {
+                        "instance_id": instance.id,
+                        "display_name": instance.display_name or instance.id,
+                        "compartment_id": compartment_id,
+                        "compartment_name": compartment_name,
+                        "region": region_name,
+                        "shape": instance.shape,
+                        "public_ip": public_ip,
+                    }
+                )
+
+    hosts.sort(
+        key=lambda host: (
+            host["display_name"].lower(),
+            host["region"],
+            host["compartment_name"].lower(),
+        )
+    )
+    return hosts
+
+
+def choose_existing_host(
+    hosts: Sequence[Dict[str, Any]],
+) -> Dict[str, Any] | None:
+    if not hosts:
+        return None
+
+    options = [
+        (
+            host["instance_id"],
+            (
+                f"{host['display_name']} ({host['public_ip']}) "
+                f"region={host['region']} compartment={host['compartment_name']} "
+                f"shape={host['shape']}"
+            ),
+        )
+        for host in hosts
+    ]
+    options.append(("__new__", "Provision a new OCI host"))
+    selected = prompt_choice("OpenClaw target host:", options)
+    if selected == "__new__":
+        return None
+    for host in hosts:
+        if host["instance_id"] == selected:
+            return host
+    raise RuntimeError("Selected host was not found")
+
+
+def run_command(command: Sequence[str]) -> None:
+    subprocess.run(command, check=True)
+
+
+def bootstrap_existing_host(args: argparse.Namespace, host: Dict[str, Any]) -> int:
+    args.ssh_user = prompt_text("SSH user", args.ssh_user)
+    private_key_path = prompt_existing_path(
+        "SSH private key path",
+        args.ssh_private_key_path or default_private_key_path(args.ssh_key_path),
+        prompt_even_if_exists=True,
+    )
+    bootstrap_script_path = Path(__file__).resolve().with_name("bootstrap_openclaw_host.sh")
+    remote_target = f"{args.ssh_user}@{host['public_ip']}:{REMOTE_OPENCLAW_BOOTSTRAP_PATH}"
+    ssh_target = f"{args.ssh_user}@{host['public_ip']}"
+
+    print(
+        "Bootstrapping existing host: "
+        f"{host['display_name']} ({host['public_ip']}) in {host['region']}"
+    )
+
+    if args.dry_run:
+        print(
+            f"Dry run: existing host {host['display_name']} "
+            f"public_ip={host['public_ip']} ssh_user={args.ssh_user}"
+        )
+        return 0
+
+    run_command(
+        [
+            "scp",
+            "-P",
+            str(args.ssh_port),
+            "-i",
+            os.path.expanduser(private_key_path),
+            str(bootstrap_script_path),
+            remote_target,
+        ]
+    )
+    remote_command = (
+        f"chmod +x {shlex.quote(REMOTE_OPENCLAW_BOOTSTRAP_PATH)} && "
+        f"sudo {shlex.quote(REMOTE_OPENCLAW_BOOTSTRAP_PATH)} "
+        f"--openclaw-user {shlex.quote(args.openclaw_user)} "
+        f"--openclaw-prefix {shlex.quote(args.openclaw_prefix)} "
+        f"--openclaw-version {shlex.quote(args.openclaw_version)}"
+    )
+    run_command(
+        [
+            "ssh",
+            "-t",
+            "-p",
+            str(args.ssh_port),
+            "-i",
+            os.path.expanduser(private_key_path),
+            ssh_target,
+            remote_command,
+        ]
+    )
+
+    print("SUCCESS OPENCLAW BOOTSTRAPPED")
+    print(f"Host: {host['display_name']}")
+    print(f"Public IP: {host['public_ip']}")
+    print(f"Region: {host['region']}")
+    print("OpenClaw next steps:")
+    print(f"- ssh to the instance as {args.ssh_user}")
+    print(f"- switch user: sudo -iu {args.openclaw_user}")
+    print("- run: openclaw onboard --install-daemon")
+    print("- run: openclaw gateway status")
+    return 0
+
+
 def main() -> int:
     try:
         args = parse_args()
         if args.workers != 1:
             raise ValueError("Only --workers 1 is supported.")
+        args.openclaw_prefix = resolve_openclaw_prefix(args)
 
-        shapes = parse_shapes(args.shapes)
-        ssh_key = load_ssh_key(args.ssh_key_path)
         base_config = load_config(args.profile)
-        location = resolve_location(args)
-
-        if not args.compartment_id:
-            args.compartment_id = base_config.get("tenancy")
 
         identity = oci.identity.IdentityClient(base_config)
         subscriptions = get_region_subscriptions(identity, base_config["tenancy"])
         subscribed_regions = [item.region_name for item in subscriptions]
         home_region = get_home_region(subscriptions)
+
+        if args.bootstrap and can_prompt():
+            compartment_rows = list_compartments_with_root(identity, base_config["tenancy"])
+            existing_hosts = collect_existing_hosts(
+                base_config=base_config,
+                compartment_rows=compartment_rows,
+                subscribed_regions=subscribed_regions,
+            )
+            if existing_hosts:
+                selected_host = choose_existing_host(existing_hosts)
+                if selected_host is not None:
+                    return bootstrap_existing_host(args, selected_host)
+            else:
+                print("No running OCI hosts with public IPs were found. Provisioning a new host.")
+
+        if not args.compartment_id:
+            compartment_name, args.compartment_id = choose_or_create_compartment(
+                identity, base_config["tenancy"]
+            )
+            print(f"Using compartment: {compartment_name} ({args.compartment_id})")
+        args.ssh_key_path = prompt_existing_path("SSH public key path", args.ssh_key_path)
+
+        shapes = parse_shapes(args.shapes)
+        ssh_key = load_ssh_key(args.ssh_key_path)
+        location = resolve_location(args)
         ranked_regions = rank_regions_by_distance(
             subscribed_regions,
             float(location["latitude"]),
@@ -180,6 +410,18 @@ def main() -> int:
         candidate_regions = filter_regions_with_subnets(
             [home_region], args.subnet_id, DEFAULT_SUBNET_IDS
         )
+        if not candidate_regions and not args.subnet_id:
+            region_config = base_config.copy()
+            region_config["region"] = home_region
+            network = oci.core.VirtualNetworkClient(region_config)
+            vcn = choose_or_create_vcn(network, args.compartment_id)
+            print(f"Using VCN: {vcn.display_name} ({vcn.id})")
+            subnet = choose_or_create_subnet(network, args.compartment_id, vcn)
+            print(f"Using subnet: {subnet.display_name} ({subnet.id})")
+            args.subnet_id = subnet.id
+            candidate_regions = filter_regions_with_subnets(
+                [home_region], args.subnet_id, DEFAULT_SUBNET_IDS
+            )
         if not candidate_regions:
             raise RuntimeError(
                 "No usable regions remain after subnet filtering. Provide --subnet-id or "
@@ -204,7 +446,8 @@ def main() -> int:
         if args.bootstrap:
             print(
                 "Bootstrap profile: OpenClaw CLI "
-                f"({args.openclaw_version}) into {args.openclaw_prefix}"
+                f"({args.openclaw_version}) into {args.openclaw_prefix} "
+                f"owned by {args.openclaw_user}"
             )
 
         if args.dry_run:
@@ -217,6 +460,8 @@ def main() -> int:
             cloud_init_data = build_openclaw_cloud_init(
                 openclaw_prefix=args.openclaw_prefix,
                 openclaw_version=args.openclaw_version,
+                openclaw_user=args.openclaw_user,
+                admin_ssh_user="ubuntu",
             )
 
         stop_event = multiprocessing.Event()
@@ -278,6 +523,7 @@ def main() -> int:
             print("OpenClaw next steps:")
             print("- wait for cloud-init to finish")
             print("- ssh to the instance as ubuntu")
+            print(f"- switch user: sudo -iu {args.openclaw_user}")
             print("- run: openclaw onboard --install-daemon")
             print("- run: openclaw gateway status")
         return 0

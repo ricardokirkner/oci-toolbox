@@ -1,6 +1,6 @@
 PYTHON ?= python3
 PROFILE ?= DEFAULT
-REGION ?= us-ashburn-1
+REGION ?=
 COMPARTMENT_ID ?=
 SUBNET_ID ?=
 INSTANCE_ID ?=
@@ -25,10 +25,12 @@ help:
 	'  make suggest PROFILE=DEFAULT' \
 	'  make suggest-capacity PROFILE=DEFAULT' \
 	'  make setup-provision PROFILE=DEFAULT' \
-	'  make provision-openclaw PROFILE=DEFAULT COMPARTMENT_ID=<ocid> SUBNET_ID=<ocid>' \
-	'  make provision-always-free PROFILE=DEFAULT COMPARTMENT_ID=<ocid> SUBNET_ID=<ocid>' \
-	'  make provision-payg PROFILE=DEFAULT COMPARTMENT_ID=<ocid> SUBNET_ID=<ocid> REGION=<region>' \
-	'  make verify PROFILE=DEFAULT COMPARTMENT_ID=<ocid> INSTANCE_ID=<ocid>' \
+	'  make provision-openclaw PROFILE=DEFAULT [COMPARTMENT_ID=<ocid>] [SUBNET_ID=<ocid>]' \
+	'    first offers existing OCI hosts with public IPs, then can provision a new host' \
+	'  make provision-always-free PROFILE=DEFAULT [COMPARTMENT_ID=<ocid>] [SUBNET_ID=<ocid>] [REGION=<region>]' \
+	'  make provision-payg PROFILE=DEFAULT [COMPARTMENT_ID=<ocid>] [SUBNET_ID=<ocid>] [REGION=<region>]' \
+	'  make verify PROFILE=DEFAULT [COMPARTMENT_ID=<ocid>] [INSTANCE_ID=<ocid>]' \
+	'  Omit OCI IDs to select existing resources or create new ones interactively.' \
 	'  make inventory PROFILE=DEFAULT' \
 	'  make inventory-json PROFILE=DEFAULT' \
 	'  make reset-dry-run PROFILE=DEFAULT' \
@@ -41,6 +43,7 @@ help:
 check:
 	PYTHONPYCACHEPREFIX=$(PY_CACHE_PREFIX) $(PYTHON) -m py_compile *.py
 	bash -n audit_ubuntu_host.sh
+	bash -n bootstrap_openclaw_host.sh
 	bash -n harden_ubuntu_host.sh
 
 suggest:
@@ -52,38 +55,38 @@ suggest-capacity:
 setup-provision:
 	$(PYTHON) best_region_provisioner.py setup-provision --profile $(PROFILE)
 
-provision-openclaw: guard-compartment-id guard-subnet-id
+provision-openclaw:
 	$(PYTHON) openclaw_provisioner.py \
 		--profile $(PROFILE) \
-		--compartment-id $(COMPARTMENT_ID) \
-		--subnet-id $(SUBNET_ID)
+		$(if $(COMPARTMENT_ID),--compartment-id $(COMPARTMENT_ID),) \
+		$(if $(SUBNET_ID),--subnet-id $(SUBNET_ID),)
 
-provision-always-free: guard-compartment-id guard-subnet-id
+provision-always-free:
 	$(PYTHON) best_region_provisioner.py provision \
 		--billing-mode always-free \
 		--profile $(PROFILE) \
-		--compartment-id $(COMPARTMENT_ID) \
-		--region $(REGION) \
+		$(if $(COMPARTMENT_ID),--compartment-id $(COMPARTMENT_ID),) \
+		$(if $(REGION),--region $(REGION),) \
 		--workers 1 \
 		--shapes $(SHAPES) \
 		--boot-volume-gb $(BOOT_VOLUME_GB) \
-		--subnet-id $(SUBNET_ID)
+		$(if $(SUBNET_ID),--subnet-id $(SUBNET_ID),)
 
-provision-payg: guard-compartment-id guard-subnet-id
+provision-payg:
 	$(PYTHON) best_region_provisioner.py provision \
 		--billing-mode payg \
 		--profile $(PROFILE) \
-		--compartment-id $(COMPARTMENT_ID) \
-		--region $(REGION) \
+		$(if $(COMPARTMENT_ID),--compartment-id $(COMPARTMENT_ID),) \
+		$(if $(REGION),--region $(REGION),) \
 		--workers 1 \
 		--shapes $(SHAPES) \
 		--boot-volume-gb $(BOOT_VOLUME_GB) \
-		--subnet-id $(SUBNET_ID)
+		$(if $(SUBNET_ID),--subnet-id $(SUBNET_ID),)
 
-verify: guard-compartment-id
+verify:
 	$(PYTHON) best_region_provisioner.py verify \
 		--profile $(PROFILE) \
-		--compartment-id $(COMPARTMENT_ID) \
+		$(if $(COMPARTMENT_ID),--compartment-id $(COMPARTMENT_ID),) \
 		$(if $(INSTANCE_ID),--instance-id $(INSTANCE_ID),)
 
 inventory:
@@ -96,8 +99,7 @@ reset-dry-run:
 	$(PYTHON) oci_account_reset.py --profile $(PROFILE)
 
 reset-execute:
-	@test "$(CONFIRM)" = "DELETE" || (echo "Set CONFIRM=DELETE to run destructive cleanup."; exit 1)
-	$(PYTHON) oci_account_reset.py --profile $(PROFILE) --delete-child-compartments --execute --confirm DELETE
+	$(PYTHON) oci_account_reset.py --profile $(PROFILE) --delete-child-compartments --execute $(if $(CONFIRM),--confirm $(CONFIRM),)
 
 audit-host: guard-host
 	scp -P $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) audit_ubuntu_host.sh $(SSH_USER)@$(HOST):$(REMOTE_AUDIT_SCRIPT_PATH)
@@ -106,12 +108,6 @@ audit-host: guard-host
 harden-host: guard-host
 	scp -P $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) harden_ubuntu_host.sh $(SSH_USER)@$(HOST):$(REMOTE_SCRIPT_PATH)
 	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x $(REMOTE_SCRIPT_PATH) && sudo $(REMOTE_SCRIPT_PATH) --ssh-port $(SSH_PORT) $(foreach port,$(HARDEN_ALLOW_PORTS),--allow-port $(port))"
-
-guard-compartment-id:
-	@test -n "$(COMPARTMENT_ID)" || (echo "COMPARTMENT_ID is required."; exit 1)
-
-guard-subnet-id:
-	@test -n "$(SUBNET_ID)" || (echo "SUBNET_ID is required."; exit 1)
 
 guard-host:
 	@test -n "$(HOST)" || (echo "HOST is required."; exit 1)
