@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Sequence, Tuple
 
 import oci
 
@@ -47,15 +47,10 @@ def find_orphaned_boot_volumes(
     ctx: CleanupContext,
     compute: oci.core.ComputeClient,
     blockstorage: oci.core.BlockstorageClient,
-    identity: oci.identity.IdentityClient,
-    root_compartment_id: str,
+    availability_domains: Sequence[str],
     compartment_id: str,
     compartment_label: str,
 ) -> None:
-    availability_domains = [
-        ad.name for ad in identity.list_availability_domains(root_compartment_id).data
-    ]
-
     for availability_domain in availability_domains:
         boot_volumes = [
             volume
@@ -91,15 +86,10 @@ def find_orphaned_block_volumes(
     ctx: CleanupContext,
     compute: oci.core.ComputeClient,
     blockstorage: oci.core.BlockstorageClient,
-    identity: oci.identity.IdentityClient,
-    root_compartment_id: str,
+    availability_domains: Sequence[str],
     compartment_id: str,
     compartment_label: str,
 ) -> None:
-    availability_domains = [
-        ad.name for ad in identity.list_availability_domains(root_compartment_id).data
-    ]
-
     for availability_domain in availability_domains:
         block_volumes = [
             volume
@@ -173,15 +163,19 @@ def cleanup_region(
 
     print(f"\nRegion {region_name}")
 
+    availability_domains = [
+        ad.name for ad in identity.list_availability_domains(root_compartment_id).data
+    ]
+
     for compartment_name, compartment_id in compartment_rows:
         label = describe_compartment(compartment_name, compartment_id)
         find_orphaned_boot_volumes(
-            ctx, compute, blockstorage, identity,
-            root_compartment_id, compartment_id, label,
+            ctx, compute, blockstorage, availability_domains,
+            compartment_id, label,
         )
         find_orphaned_block_volumes(
-            ctx, compute, blockstorage, identity,
-            root_compartment_id, compartment_id, label,
+            ctx, compute, blockstorage, availability_domains,
+            compartment_id, label,
         )
         find_unassigned_public_ips(ctx, network, compartment_id, label)
 

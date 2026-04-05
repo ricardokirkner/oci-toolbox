@@ -150,8 +150,10 @@ def fetch_instance_by_id(
         compute = oci.core.ComputeClient(region_config)
         try:
             instance = compute.get_instance(instance_id).data
-        except oci.exceptions.ServiceError:
-            continue
+        except oci.exceptions.ServiceError as exc:
+            if exc.status == 404:
+                continue
+            raise
 
         if instance.lifecycle_state in {"TERMINATED", "TERMINATING"}:
             raise RuntimeError(
