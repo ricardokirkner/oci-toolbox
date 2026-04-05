@@ -1,3 +1,4 @@
+comma := ,
 PYTHON ?= python3
 PROFILE ?= DEFAULT
 REGION ?=
@@ -10,6 +11,7 @@ HOST ?=
 SSH_USER ?= ubuntu
 SSH_KEY_PATH ?=
 SSH_PORT ?= 22
+OPENCLAW_LOG_COLOR ?= auto
 AUDIT_EXPECT_PORTS ?=
 HARDEN_ALLOW_PORTS ?=
 OPENCLAW_SERVICE_USER ?= openclaw
@@ -17,7 +19,9 @@ OPENCLAW_VERSION ?= latest
 OPENCLAW_PREFIX ?=
 OPENCLAW_CONFIG_REPO ?=
 OPENCLAW_CONFIG_FILE ?= openclaw.json
-OPENCLAW_CONFIG_REMOTE_ROOT ?=
+OPENCLAW_CONFIG_REMOTE_ROOT ?= /home/$(OPENCLAW_SERVICE_USER)/openclaw-config
+OPENCLAW_ALLOW_INSTALL_PREFIX_OVERWRITE ?=
+OPENCLAW_PULL_YES ?=
 REMOTE_SCRIPT_PATH ?= /tmp/harden_ubuntu_host.sh
 REMOTE_AUDIT_SCRIPT_PATH ?= /tmp/audit_ubuntu_host.sh
 REMOTE_OPENCLAW_BOOTSTRAP_SCRIPT_PATH ?= /tmp/bootstrap_openclaw_host.sh
@@ -31,11 +35,11 @@ include .env
 endif
 
 export PROFILE REGION COMPARTMENT_ID SUBNET_ID INSTANCE_ID SHAPES BOOT_VOLUME_GB
-export HOST SSH_USER SSH_KEY_PATH SSH_PORT AUDIT_EXPECT_PORTS HARDEN_ALLOW_PORTS
+export HOST SSH_USER SSH_KEY_PATH SSH_PORT OPENCLAW_LOG_COLOR AUDIT_EXPECT_PORTS HARDEN_ALLOW_PORTS
 export OPENCLAW_SERVICE_USER OPENCLAW_VERSION OPENCLAW_PREFIX
-export OPENCLAW_CONFIG_REPO OPENCLAW_CONFIG_FILE OPENCLAW_CONFIG_REMOTE_ROOT
+export OPENCLAW_CONFIG_REPO OPENCLAW_CONFIG_FILE OPENCLAW_CONFIG_REMOTE_ROOT OPENCLAW_ALLOW_INSTALL_PREFIX_OVERWRITE OPENCLAW_PULL_YES
 
-.PHONY: help check suggest suggest-capacity setup-provision provision-openclaw provision-always-free provision-payg verify inventory inventory-json reset-dry-run reset-execute harden-host audit-host review-openclaw-host sync-openclaw-config openclaw-gateway-status openclaw-gateway-restart openclaw-gateway-logs
+.PHONY: help check suggest suggest-capacity setup-provision provision-openclaw provision-always-free provision-payg verify inventory inventory-json delete-instance delete-instance-execute cleanup-unused cleanup-unused-execute reset-dry-run reset-execute harden-host audit-host review-openclaw-host sync-openclaw-config pull-openclaw-config openclaw-logs openclaw-gateway-status openclaw-gateway-restart openclaw-gateway-journal openclaw-gateway-logs
 
 help:
 	@printf '%s\n' \
@@ -55,21 +59,30 @@ help:
 	'  make inventory-json PROFILE=DEFAULT' \
 	'  make reset-dry-run PROFILE=DEFAULT' \
 	'  make reset-execute PROFILE=DEFAULT CONFIRM=DELETE' \
+	'  make delete-instance PROFILE=DEFAULT [INSTANCE_ID=<ocid>]' \
+	'  make delete-instance-execute PROFILE=DEFAULT [INSTANCE_ID=<ocid>]' \
+	'  make cleanup-unused PROFILE=DEFAULT' \
+	'  make cleanup-unused-execute PROFILE=DEFAULT' \
 	'  make audit-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa' \
 	'  make audit-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa AUDIT_EXPECT_PORTS="22 443"' \
 	'  make harden-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa' \
 	'  make harden-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa HARDEN_ALLOW_PORTS="80 443"' \
 	'  make review-openclaw-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa' \
-	'  make sync-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/repo' \
+	'  make sync-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/local-openclaw-dir' \
+	'    default remote root is /home/openclaw/openclaw-config; set OPENCLAW_CONFIG_REMOTE_ROOT explicitly if needed' \
+	'  make pull-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/local-openclaw-dir [OPENCLAW_PULL_YES=1]' \
+	'  make openclaw-logs HOST=<ip-or-dns> [OPENCLAW_LOG_COLOR=never]' \
 	'  make openclaw-gateway-status HOST=<ip-or-dns>' \
 	'  make openclaw-gateway-restart HOST=<ip-or-dns>' \
-	'  make openclaw-gateway-logs HOST=<ip-or-dns>'
+	'  make openclaw-gateway-journal HOST=<ip-or-dns> [OPENCLAW_LOG_COLOR=never]' \
+	'  make openclaw-gateway-logs HOST=<ip-or-dns> [OPENCLAW_LOG_COLOR=never]  # alias for openclaw-logs'
 
 check:
 	PYTHONPYCACHEPREFIX=$(PY_CACHE_PREFIX) $(PYTHON) -m py_compile *.py
 	bash -n audit_ubuntu_host.sh
 	bash -n bootstrap_openclaw_host.sh
 	bash -n harden_ubuntu_host.sh
+	bash -n pull_openclaw_config_local.sh
 	bash -n review_openclaw_host.sh
 	bash -n sync_openclaw_config_host.sh
 
@@ -128,13 +141,31 @@ reset-dry-run:
 reset-execute:
 	$(PYTHON) oci_account_reset.py --profile $(PROFILE) --delete-child-compartments --execute $(if $(CONFIRM),--confirm $(CONFIRM),)
 
+delete-instance:
+	$(PYTHON) oci_instance_delete.py --profile $(PROFILE) \
+		$(if $(INSTANCE_ID),--instance-id $(INSTANCE_ID),) \
+		$(foreach r,$(subst $(comma), ,$(REGION)),--region $(r))
+
+delete-instance-execute:
+	$(PYTHON) oci_instance_delete.py --profile $(PROFILE) --execute \
+		$(if $(INSTANCE_ID),--instance-id $(INSTANCE_ID),) \
+		$(foreach r,$(subst $(comma), ,$(REGION)),--region $(r))
+
+cleanup-unused:
+	$(PYTHON) oci_cleanup_unused.py --profile $(PROFILE) \
+		$(foreach r,$(subst $(comma), ,$(REGION)),--region $(r))
+
+cleanup-unused-execute:
+	$(PYTHON) oci_cleanup_unused.py --profile $(PROFILE) --execute \
+		$(foreach r,$(subst $(comma), ,$(REGION)),--region $(r))
+
 audit-host: guard-host
 	scp -P $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) audit_ubuntu_host.sh $(SSH_USER)@$(HOST):$(REMOTE_AUDIT_SCRIPT_PATH)
-	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x $(REMOTE_AUDIT_SCRIPT_PATH) && sudo $(REMOTE_AUDIT_SCRIPT_PATH) $(foreach port,$(AUDIT_EXPECT_PORTS),--expect-open-port $(port))"
+	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x $(REMOTE_AUDIT_SCRIPT_PATH) && sudo $(REMOTE_AUDIT_SCRIPT_PATH) $(foreach port,$(subst $(comma), ,$(AUDIT_EXPECT_PORTS)),--expect-open-port $(port))"
 
 harden-host: guard-host
 	scp -P $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) harden_ubuntu_host.sh $(SSH_USER)@$(HOST):$(REMOTE_SCRIPT_PATH)
-	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x $(REMOTE_SCRIPT_PATH) && sudo $(REMOTE_SCRIPT_PATH) --ssh-port $(SSH_PORT) $(foreach port,$(HARDEN_ALLOW_PORTS),--allow-port $(port))"
+	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x $(REMOTE_SCRIPT_PATH) && sudo $(REMOTE_SCRIPT_PATH) --ssh-port $(SSH_PORT) $(foreach port,$(subst $(comma), ,$(HARDEN_ALLOW_PORTS)),--allow-port $(port))"
 
 review-openclaw-host: guard-host
 	scp -P $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) bootstrap_openclaw_host.sh $(SSH_USER)@$(HOST):$(REMOTE_OPENCLAW_BOOTSTRAP_SCRIPT_PATH)
@@ -143,9 +174,19 @@ review-openclaw-host: guard-host
 
 sync-openclaw-config: guard-host guard-openclaw-config-repo
 	scp -P $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) sync_openclaw_config_host.sh $(SSH_USER)@$(HOST):$(REMOTE_OPENCLAW_CONFIG_SYNC_SCRIPT_PATH)
-	ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "rm -rf '$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)' && mkdir -p '$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)'"
-	tar --exclude='.git' --exclude='.DS_Store' -C "$(OPENCLAW_CONFIG_REPO)" -cf - . | ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "tar -xf - -C '$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)'"
-	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x '$(REMOTE_OPENCLAW_CONFIG_SYNC_SCRIPT_PATH)' && sudo '$(REMOTE_OPENCLAW_CONFIG_SYNC_SCRIPT_PATH)' --openclaw-user '$(OPENCLAW_SERVICE_USER)' --config-staging-path '$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)' --config-file '$(OPENCLAW_CONFIG_FILE)' $(if $(OPENCLAW_CONFIG_REMOTE_ROOT),--config-root '$(OPENCLAW_CONFIG_REMOTE_ROOT)',)"
+	ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "mkdir -p '$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)'"
+	rsync -az --delete --exclude='.git' --exclude='.DS_Store' -e "ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),)" "$(OPENCLAW_CONFIG_REPO)/" "$(SSH_USER)@$(HOST):$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)/"
+	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "chmod +x '$(REMOTE_OPENCLAW_CONFIG_SYNC_SCRIPT_PATH)' && sudo '$(REMOTE_OPENCLAW_CONFIG_SYNC_SCRIPT_PATH)' --openclaw-user '$(OPENCLAW_SERVICE_USER)' --config-staging-path '$(REMOTE_OPENCLAW_CONFIG_STAGING_PATH)' --config-file '$(OPENCLAW_CONFIG_FILE)' --config-root '$(OPENCLAW_CONFIG_REMOTE_ROOT)' $(if $(OPENCLAW_ALLOW_INSTALL_PREFIX_OVERWRITE),--allow-install-prefix-overwrite,)"
+
+pull-openclaw-config: guard-host guard-openclaw-config-repo
+	bash ./pull_openclaw_config_local.sh --local-root '$(OPENCLAW_CONFIG_REPO)' --remote-host '$(HOST)' --remote-root '$(OPENCLAW_CONFIG_REMOTE_ROOT)' --ssh-user '$(SSH_USER)' --ssh-port '$(SSH_PORT)' $(if $(SSH_KEY_PATH),--ssh-key-path '$(SSH_KEY_PATH)',) --config-file '$(OPENCLAW_CONFIG_FILE)' $(if $(OPENCLAW_PULL_YES),--yes,)
+
+openclaw-logs: guard-host
+	@if [ "$(OPENCLAW_LOG_COLOR)" = "never" ]; then \
+		ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "sudo -iu '$(OPENCLAW_SERVICE_USER)' env TERM=dumb NO_COLOR=1 openclaw logs --limit 100"; \
+	else \
+		ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "sudo --preserve-env=TERM -iu '$(OPENCLAW_SERVICE_USER)' openclaw logs --limit 100"; \
+	fi
 
 openclaw-gateway-status: guard-host
 	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "sudo systemctl --machine='$(OPENCLAW_SERVICE_USER)'@.host --user status openclaw-gateway.service --no-pager -n 40"
@@ -153,8 +194,14 @@ openclaw-gateway-status: guard-host
 openclaw-gateway-restart: guard-host
 	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "sudo systemctl --machine='$(OPENCLAW_SERVICE_USER)'@.host --user restart openclaw-gateway.service && sudo systemctl --machine='$(OPENCLAW_SERVICE_USER)'@.host --user status openclaw-gateway.service --no-pager -n 40"
 
-openclaw-gateway-logs: guard-host
-	ssh -t -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "sudo journalctl --machine='$(OPENCLAW_SERVICE_USER)'@.host --user-unit openclaw-gateway.service --no-pager -n 100"
+openclaw-gateway-journal: guard-host
+	@if [ "$(OPENCLAW_LOG_COLOR)" = "never" ]; then \
+		ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "uid=\$$(id -u '$(OPENCLAW_SERVICE_USER)') && sudo journalctl _UID=\$$uid _SYSTEMD_USER_UNIT=openclaw-gateway.service --no-pager -n 100 -o short-iso"; \
+	else \
+		ssh -p $(SSH_PORT) $(if $(SSH_KEY_PATH),-i $(SSH_KEY_PATH),) $(SSH_USER)@$(HOST) "uid=\$$(id -u '$(OPENCLAW_SERVICE_USER)') && sudo journalctl _UID=\$$uid _SYSTEMD_USER_UNIT=openclaw-gateway.service --no-pager -n 100 -o short-iso" | if command -v ccze >/dev/null 2>&1; then ccze -A; else cat; fi; \
+	fi
+
+openclaw-gateway-logs: openclaw-logs
 
 guard-host:
 	@test -n "$(HOST)" || (echo "HOST is required."; exit 1)
