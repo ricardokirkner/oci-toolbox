@@ -307,3 +307,8 @@ commands, the CLI can list existing OCI resources and let you select one or
 create a new one interactively. For `make` commands, those values can also come
 from a local `.env` file, and command-line assignments still take precedence
 over `.env`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+

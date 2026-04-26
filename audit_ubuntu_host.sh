@@ -125,7 +125,7 @@ record_listener_findings() {
     if [[ "${address}" == "127.0.0.53" && "${port}" == "53" ]]; then
       continue
     fi
-    if [[ "${address}" == "<REDACTED-PRIVATE-IP>" && "${port}" == "68" ]]; then
+    if [[ "${port}" == "68" ]]; then
       continue
     fi
     if [[ "${address}" == "127.0.0.1" || "${address}" == "::1" ]]; then
