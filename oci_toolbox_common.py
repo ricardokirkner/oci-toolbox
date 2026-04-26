@@ -53,7 +53,7 @@ TIMEZONE_COORDINATES: Dict[str, Tuple[float, float]] = {
     "America/Lima": (-12.0464, -77.0428),
     "America/Los_Angeles": (34.0522, -118.2437),
     "America/Mexico_City": (19.4326, -99.1332),
-    "America/Montevideo": (<REDACTED>, <REDACTED>),
+    "America/Montevideo": (-34.8833, -56.1833),
     "America/New_York": (40.7128, -74.0060),
     "America/Phoenix": (33.4484, -112.0740),
     "America/Santiago": (-33.4489, -70.6693),
