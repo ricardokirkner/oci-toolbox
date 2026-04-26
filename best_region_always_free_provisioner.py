@@ -86,21 +86,6 @@ def parse_args() -> argparse.Namespace:
         help="Display name prefix for the created instance",
     )
     parser.add_argument(
-        "--latitude",
-        type=float,
-        help="Latitude override for region ranking",
-    )
-    parser.add_argument(
-        "--longitude",
-        type=float,
-        help="Longitude override for region ranking",
-    )
-    parser.add_argument(
-        "--local-timezone",
-        default=os.environ.get("TZ", "America/Montevideo"),
-        help="IANA timezone used when latitude/longitude are not provided",
-    )
-    parser.add_argument(
         "--bootstrap",
         action="store_true",
         default=True,
@@ -141,7 +126,7 @@ def main() -> int:
 
         shapes = parse_shapes(args.shapes)
         ssh_key = load_ssh_key(args.ssh_key_path)
-        location = resolve_location(args)
+        location = resolve_location()
         ranked_regions = rank_regions_by_distance(
             subscribed_regions,
             float(location["latitude"]),

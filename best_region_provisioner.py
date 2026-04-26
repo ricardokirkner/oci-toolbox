@@ -55,21 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Recommend likely home regions for a new Always Free account",
     )
     suggest.add_argument(
-        "--latitude",
-        type=float,
-        help="Latitude override for region ranking",
-    )
-    suggest.add_argument(
-        "--longitude",
-        type=float,
-        help="Longitude override for region ranking",
-    )
-    suggest.add_argument(
-        "--local-timezone",
-        default="America/Montevideo",
-        help="IANA timezone used when latitude/longitude are not provided",
-    )
-    suggest.add_argument(
         "--limit",
         type=int,
         default=5,
@@ -142,21 +127,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Boot volume size in GB",
     )
     provision.add_argument(
-        "--latitude",
-        type=float,
-        help="Latitude override for reporting",
-    )
-    provision.add_argument(
-        "--longitude",
-        type=float,
-        help="Longitude override for reporting",
-    )
-    provision.add_argument(
-        "--local-timezone",
-        default="America/Montevideo",
-        help="IANA timezone used when latitude/longitude are not provided",
-    )
-    provision.add_argument(
         "--bootstrap",
         action="store_true",
         default=True,
@@ -211,11 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Display name prefix for the created instance",
     )
     setup.add_argument(
-        "--local-timezone",
-        default="America/Montevideo",
-        help="IANA timezone used when latitude/longitude are not provided",
-    )
-    setup.add_argument(
         "--bootstrap",
         action="store_true",
         default=True,
@@ -259,7 +224,7 @@ def rank_public_regions(
 
 
 def handle_suggest(args: argparse.Namespace) -> int:
-    location = resolve_location(args)
+    location = resolve_location()
     ranked = rank_public_regions(
         float(location["latitude"]),
         float(location["longitude"]),
@@ -610,7 +575,7 @@ def handle_provision(args: argparse.Namespace) -> int:
 
     shapes = parse_shapes(args.shapes)
     ssh_key = load_ssh_key(args.ssh_key_path)
-    location = resolve_location(args)
+    location = resolve_location()
 
     validate_target_region(
         billing_mode=args.billing_mode,
@@ -814,9 +779,6 @@ def handle_setup_provision(args: argparse.Namespace) -> int:
         shapes=shapes,
         name_prefix=name_prefix,
         boot_volume_gb=boot_volume_gb,
-        latitude=None,
-        longitude=None,
-        local_timezone=args.local_timezone,
         bootstrap=bootstrap,
         dry_run=False,
     )

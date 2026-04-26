@@ -21,24 +21,12 @@ from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 import oci
 
 
-DEFAULT_COMPARTMENT_ID = (
-    "<REDACTED-TENANCY-OCID>"
-)
-
-DEFAULT_SUBNET_IDS = {
-    "us-ashburn-1": (
-        "<REDACTED-SUBNET-OCID>"
-    ),
-}
+DEFAULT_SUBNET_IDS: Dict[str, str] = {}
 
 DEFAULT_LOCATION = {
-    "label": "<REDACTED>",
-    "latitude": <REDACTED>,
-    "longitude": <REDACTED>,
-}
-
-TIMEZONE_LOCATIONS = {
-    "America/Montevideo": DEFAULT_LOCATION,
+    "label": "unspecified",
+    "latitude": 0.0,
+    "longitude": 0.0,
 }
 
 REGION_COORDINATES = {
@@ -54,6 +42,44 @@ REGION_COORDINATES = {
     "ca-toronto-1": (43.6532, -79.3832),
     "eu-frankfurt-1": (50.1109, 8.6821),
     "eu-madrid-1": (40.4168, -3.7038),
+}
+
+TIMEZONE_COORDINATES: Dict[str, Tuple[float, float]] = {
+    "America/Argentina/Buenos_Aires": (-34.6037, -58.3816),
+    "America/Bogota": (4.7110, -74.0721),
+    "America/Chicago": (41.8781, -87.6298),
+    "America/Denver": (39.7392, -104.9903),
+    "America/Halifax": (44.6488, -63.5752),
+    "America/Lima": (-12.0464, -77.0428),
+    "America/Los_Angeles": (34.0522, -118.2437),
+    "America/Mexico_City": (19.4326, -99.1332),
+    "America/Montevideo": (<REDACTED>, <REDACTED>),
+    "America/New_York": (40.7128, -74.0060),
+    "America/Phoenix": (33.4484, -112.0740),
+    "America/Santiago": (-33.4489, -70.6693),
+    "America/Sao_Paulo": (-23.5505, -46.6333),
+    "America/Toronto": (43.6532, -79.3832),
+    "America/Vancouver": (49.2827, -123.1207),
+    "Asia/Bangkok": (13.7563, 100.5018),
+    "Asia/Dubai": (25.2048, 55.2708),
+    "Asia/Hong_Kong": (22.3193, 114.1694),
+    "Asia/Jerusalem": (31.7683, 35.2137),
+    "Asia/Kolkata": (22.5726, 88.3639),
+    "Asia/Seoul": (37.5665, 126.9780),
+    "Asia/Shanghai": (31.2304, 121.4737),
+    "Asia/Singapore": (1.3521, 103.8198),
+    "Asia/Tokyo": (35.6762, 139.6503),
+    "Australia/Sydney": (-33.8688, 151.2093),
+    "Europe/Amsterdam": (52.3676, 4.9041),
+    "Europe/Berlin": (52.5200, 13.4050),
+    "Europe/Dublin": (53.3498, -6.2603),
+    "Europe/London": (51.5074, -0.1278),
+    "Europe/Madrid": (40.4168, -3.7038),
+    "Europe/Paris": (48.8566, 2.3522),
+    "Europe/Rome": (41.9028, 12.4964),
+    "Europe/Stockholm": (59.3293, 18.0686),
+    "Pacific/Auckland": (-36.8485, 174.7633),
+    "UTC": (0.0, 0.0),
 }
 
 UBUNTU_VERSIONS = ("24.04", "22.04")
@@ -471,19 +497,11 @@ def haversine_km(
     return 2 * radius_km * math.asin(math.sqrt(hav))
 
 
-def resolve_location(args: Any) -> Dict[str, float | str]:
-    if args.latitude is not None or args.longitude is not None:
-        if args.latitude is None or args.longitude is None:
-            raise ValueError("Both --latitude and --longitude are required together")
-        return {
-            "label": f"custom ({args.latitude:.4f}, {args.longitude:.4f})",
-            "latitude": args.latitude,
-            "longitude": args.longitude,
-        }
-
-    if args.local_timezone in TIMEZONE_LOCATIONS:
-        return TIMEZONE_LOCATIONS[args.local_timezone]
-
+def resolve_location() -> Dict[str, float | str]:
+    tz = os.environ.get("TZ")
+    if tz in TIMEZONE_COORDINATES:
+        latitude, longitude = TIMEZONE_COORDINATES[tz]
+        return {"label": tz, "latitude": latitude, "longitude": longitude}
     return DEFAULT_LOCATION
 
 
