@@ -5,19 +5,22 @@ OPENCLAW_USER=openclaw
 CONFIG_STAGING_PATH=/tmp/openclaw-config-staging
 CONFIG_ROOT=
 CONFIG_FILE=openclaw.json
+ALLOW_INSTALL_PREFIX_OVERWRITE=0
 
 usage() {
   cat <<'EOF'
 Usage: sudo ./sync_openclaw_config_host.sh [options]
 
-Install a synced OpenClaw config repo onto the host, repoint the service user to
+Install a synced OpenClaw directory onto the host, point the service user at
 that config, validate it, and refresh the user service if present.
 
 Options:
   --openclaw-user <user>         Service user that owns and runs OpenClaw. Default: openclaw
   --config-staging-path <path>   Staging path already populated on the host. Default: /tmp/openclaw-config-staging
-  --config-root <path>           Final config repo location on the host. Default: <service-home>/openclaw-config
-  --config-file <path>           Config file inside the repo root. Default: openclaw.json
+  --config-root <path>           Final synced directory on the host. Default: <service-home>/openclaw-config
+  --config-file <path>           Config file inside the synced directory. Default: openclaw.json
+  --allow-install-prefix-overwrite
+                                 Allow syncing directly into <service-home>/.openclaw.
   -h, --help                     Show this help text.
 EOF
 }
@@ -60,6 +63,10 @@ parse_args() {
         CONFIG_FILE="${2:-}"
         shift 2
         ;;
+      --allow-install-prefix-overwrite)
+        ALLOW_INSTALL_PREFIX_OVERWRITE=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -79,15 +86,20 @@ resolve_context() {
   USER_ENTRY=$(getent passwd "${OPENCLAW_USER}") || die "user does not exist: ${OPENCLAW_USER}"
   USER_HOME=$(cut -d: -f6 <<<"${USER_ENTRY}")
   USER_GROUP=$(id -gn "${OPENCLAW_USER}")
+  OPENCLAW_HOME_DIR="${USER_HOME}/.openclaw"
 
   if [[ -z "${CONFIG_ROOT}" ]]; then
     CONFIG_ROOT="${USER_HOME}/openclaw-config"
   fi
 
+  if [[ "${CONFIG_ROOT}" == "${OPENCLAW_HOME_DIR}" && "${ALLOW_INSTALL_PREFIX_OVERWRITE}" -ne 1 ]]; then
+    die "Refusing to sync into ${OPENCLAW_HOME_DIR} because it is also the OpenClaw install prefix. Use --allow-install-prefix-overwrite only if you intentionally want to replace the installed CLI files."
+  fi
+
   CONFIG_TARGET_FILE="${CONFIG_ROOT}/${CONFIG_FILE}"
-  OPENCLAW_HOME_DIR="${USER_HOME}/.openclaw"
   OPENCLAW_DEFAULT_CONFIG="${OPENCLAW_HOME_DIR}/openclaw.json"
-  USER_ENV_DIR="${USER_HOME}/.config/environment.d"
+  USER_CONFIG_DIR="${USER_HOME}/.config"
+  USER_ENV_DIR="${USER_CONFIG_DIR}/environment.d"
   USER_ENV_FILE="${USER_ENV_DIR}/openclaw.conf"
   USER_SERVICE_DROPIN_DIR="${USER_HOME}/.config/systemd/user/openclaw-gateway.service.d"
   USER_SERVICE_DROPIN_FILE="${USER_SERVICE_DROPIN_DIR}/10-config-path.conf"
@@ -98,20 +110,18 @@ install_repo() {
     die "Config file ${CONFIG_FILE} was not found under staging path ${CONFIG_STAGING_PATH}"
   }
 
-  local tmp_root
-  tmp_root="${CONFIG_ROOT}.tmp.$$"
-  rm -rf "${tmp_root}"
-  mkdir -p "$(dirname "${CONFIG_ROOT}")"
-  mkdir -p "${tmp_root}"
-  cp -a "${CONFIG_STAGING_PATH}/." "${tmp_root}/"
-  chown -R "${OPENCLAW_USER}:${USER_GROUP}" "${tmp_root}"
-  rm -rf "${CONFIG_ROOT}"
-  mv "${tmp_root}" "${CONFIG_ROOT}"
+  install -d -o "${OPENCLAW_USER}" -g "${USER_GROUP}" -m 0755 "$(dirname "${CONFIG_ROOT}")"
+  install -d -o "${OPENCLAW_USER}" -g "${USER_GROUP}" -m 0755 "${CONFIG_ROOT}"
+  if [[ "${CONFIG_TARGET_FILE}" == "${OPENCLAW_DEFAULT_CONFIG}" && -L "${CONFIG_TARGET_FILE}" ]]; then
+    rm -f "${CONFIG_TARGET_FILE}"
+  fi
+  rsync -a --delete "${CONFIG_STAGING_PATH}/" "${CONFIG_ROOT}/"
   chown -R "${OPENCLAW_USER}:${USER_GROUP}" "${CONFIG_ROOT}"
 }
 
 write_config_path_overrides() {
   install -d -o "${OPENCLAW_USER}" -g "${USER_GROUP}" -m 0755 "${OPENCLAW_HOME_DIR}"
+  install -d -o "${OPENCLAW_USER}" -g "${USER_GROUP}" -m 0755 "${USER_CONFIG_DIR}"
   install -d -o "${OPENCLAW_USER}" -g "${USER_GROUP}" -m 0755 "${USER_ENV_DIR}"
   install -d -o "${OPENCLAW_USER}" -g "${USER_GROUP}" -m 0755 "${USER_SERVICE_DROPIN_DIR}"
 
@@ -124,8 +134,10 @@ EOF
 Environment=OPENCLAW_CONFIG_PATH=${CONFIG_TARGET_FILE}
 EOF
 
-  ln -sfn "${CONFIG_TARGET_FILE}" "${OPENCLAW_DEFAULT_CONFIG}"
-  chown -h "${OPENCLAW_USER}:${USER_GROUP}" "${OPENCLAW_DEFAULT_CONFIG}"
+  if [[ "${CONFIG_TARGET_FILE}" != "${OPENCLAW_DEFAULT_CONFIG}" ]]; then
+    ln -sfn "${CONFIG_TARGET_FILE}" "${OPENCLAW_DEFAULT_CONFIG}"
+    chown -h "${OPENCLAW_USER}:${USER_GROUP}" "${OPENCLAW_DEFAULT_CONFIG}"
+  fi
   chown "${OPENCLAW_USER}:${USER_GROUP}" "${USER_ENV_FILE}" "${USER_SERVICE_DROPIN_FILE}"
 }
 
@@ -162,7 +174,7 @@ main() {
   write_config_path_overrides
   validate_config
   refresh_gateway_service
-  log "config repo installed at ${CONFIG_ROOT}"
+  log "synced directory installed at ${CONFIG_ROOT}"
   log "active config path is ${CONFIG_TARGET_FILE}"
 }
 

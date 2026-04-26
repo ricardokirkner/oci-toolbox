@@ -98,21 +98,69 @@ make review-openclaw-host \
   SSH_KEY_PATH=~/.ssh/id_rsa
 ```
 
-Sync a tracked local OpenClaw config repo to the host:
+Sync a local OpenClaw directory to the host, overwriting the remote copy:
 
 ```bash
 make sync-openclaw-config \
   HOST=<public-ip-or-dns> \
   SSH_USER=ubuntu \
   SSH_KEY_PATH=~/.ssh/id_rsa \
-  OPENCLAW_CONFIG_REPO=/path/to/openclaw-config-repo
+  OPENCLAW_CONFIG_REPO=/path/to/local-openclaw-dir
 ```
 
-The expected repo layout is simple: keep `openclaw.json` at the repo root, and
-store any included files or directories underneath that same root. The sync
-command copies the repo to the host, points the `openclaw` service user at the
-tracked `openclaw.json`, validates the config, and restarts the gateway if that
-user service is already active.
+The sync command rsyncs the entire local directory to the host, mirrors it into
+the remote OpenClaw directory with `--delete`, validates `openclaw.json`, and
+restarts the gateway if that user service is already active. By default the
+remote target directory is `/home/openclaw/openclaw-config`; override
+`OPENCLAW_CONFIG_REMOTE_ROOT` if the remote config directory lives elsewhere.
+Do not target `/home/openclaw/.openclaw` unless you intentionally want to
+replace the OpenClaw install prefix too; if you do, set
+`OPENCLAW_ALLOW_INSTALL_PREFIX_OVERWRITE=1`.
+
+Pull the remote OpenClaw directory back to local, show the diff, then confirm
+before overwriting local files:
+
+```bash
+make pull-openclaw-config \
+  HOST=<public-ip-or-dns> \
+  SSH_USER=ubuntu \
+  SSH_KEY_PATH=~/.ssh/id_rsa \
+  OPENCLAW_CONFIG_REPO=/path/to/local-openclaw-dir
+```
+
+That target stages the remote tree locally, prints a unified diff against
+`OPENCLAW_CONFIG_REPO`, and prompts before applying the remote copy. Set
+`OPENCLAW_PULL_YES=1` to skip the prompt after the diff is shown.
+
+View recent OpenClaw logs with the CLI-rendered output:
+
+```bash
+make openclaw-logs \
+  HOST=<public-ip-or-dns> \
+  SSH_USER=ubuntu \
+  SSH_KEY_PATH=~/.ssh/id_rsa
+```
+
+For plain, non-colorized output:
+
+```bash
+make openclaw-logs \
+  HOST=<public-ip-or-dns> \
+  SSH_USER=ubuntu \
+  SSH_KEY_PATH=~/.ssh/id_rsa \
+  OPENCLAW_LOG_COLOR=never
+```
+
+If you need the underlying systemd journal instead, use:
+
+```bash
+make openclaw-gateway-journal \
+  HOST=<public-ip-or-dns> \
+  SSH_USER=ubuntu \
+  SSH_KEY_PATH=~/.ssh/id_rsa
+```
+
+That target also supports `OPENCLAW_LOG_COLOR=never` to skip local colorization.
 
 Verify whether a launch is aligned with the documented Always Free envelope:
 
@@ -250,7 +298,8 @@ make audit-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa
 make audit-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa AUDIT_EXPECT_PORTS="22 443"
 make harden-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa HARDEN_ALLOW_PORTS="80 443"
 make review-openclaw-host HOST=<ip-or-dns> SSH_USER=ubuntu SSH_KEY_PATH=~/.ssh/id_rsa
-make sync-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/openclaw-config-repo
+make sync-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/local-openclaw-dir
+make pull-openclaw-config HOST=<ip-or-dns> OPENCLAW_CONFIG_REPO=/path/to/local-openclaw-dir
 ```
 
 If you omit `COMPARTMENT_ID`, `SUBNET_ID`, or `REGION` on the provisioning
