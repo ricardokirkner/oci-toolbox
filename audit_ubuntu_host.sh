@@ -80,7 +80,7 @@ parse_args() {
   done
 
   local port
-  for port in "${EXPECTED_OPEN_PORTS[@]:-}"; do
+  for port in "${EXPECTED_OPEN_PORTS[@]+"${EXPECTED_OPEN_PORTS[@]}"}"; do
     [[ "${port}" =~ ^[0-9]+$ ]] || {
       echo "[audit] ERROR: expected port must be numeric: ${port}" >&2
       exit 1

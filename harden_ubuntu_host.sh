@@ -70,7 +70,7 @@ parse_args() {
   (( SSH_PORT >= 1 && SSH_PORT <= 65535 )) || die "SSH port must be in 1..65535"
 
   local port
-  for port in "${ALLOW_PORTS[@]:-}"; do
+  for port in "${ALLOW_PORTS[@]+"${ALLOW_PORTS[@]}"}"; do
     [[ "${port}" =~ ^[0-9]+$ ]] || die "allowed port must be numeric: ${port}"
     (( port >= 1 && port <= 65535 )) || die "allowed port must be in 1..65535: ${port}"
   done
@@ -234,7 +234,7 @@ configure_ufw() {
   ufw allow "${SSH_PORT}/tcp" comment 'ssh'
 
   local port
-  for port in "${ALLOW_PORTS[@]:-}"; do
+  for port in "${ALLOW_PORTS[@]+"${ALLOW_PORTS[@]}"}"; do
     ufw allow "${port}/tcp"
   done
 
