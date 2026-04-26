@@ -29,10 +29,10 @@ Small OCI CLI helpers for:
 - OCI config and credentials in `~/.oci/config`
 - an SSH public key available for provisioning flows
 
-Install the SDK if needed:
+Install dependencies:
 
 ```bash
-python3 -m pip install oci
+python3 -m pip install -r requirements.txt
 ```
 
 You can also create a local `.env` file for the `make` commands. The Makefile
